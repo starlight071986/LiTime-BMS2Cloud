@@ -133,6 +133,13 @@ bool bmsDataValid = false;
 bool bmsConnectPending = false;
 
 // ============================================================================
+// WLAN-Sendestärke-Konfiguration
+// ============================================================================
+// Stufen: 0 = Niedrig (5 dBm), 1 = Normal (11 dBm), 2 = Hoch (17 dBm)
+// Höhere Sendeleistung = bessere Reichweite, aber mehr Wärmeentwicklung
+uint8_t wifiTxPower = 0;  // Standard: Niedrig (5 dBm) für minimale Wärme
+
+// ============================================================================
 // Home Assistant Webhook-Konfiguration
 // ============================================================================
 
@@ -393,6 +400,7 @@ void saveSettings() {
   preferences.putULong("haInterval", haInterval);
   preferences.putBool("haEnabled", haEnabled);
   preferences.putBool("serialOut", serialOutputEnabled);
+  preferences.putUChar("wifiTxPower", wifiTxPower);
 
   // Namespace schließen um Änderungen zu persistieren
   preferences.end();
@@ -417,8 +425,34 @@ void loadSettings() {
   haInterval = preferences.getULong("haInterval", 60);
   haEnabled = preferences.getBool("haEnabled", false);
   serialOutputEnabled = preferences.getBool("serialOut", true);
+  wifiTxPower = preferences.getUChar("wifiTxPower", 0);  // Standard: Niedrig
 
   preferences.end();
+}
+
+/**
+ * Wendet die konfigurierte WLAN-Sendestärke an
+ *
+ * Stufen:
+ * - 0: Niedrig (5 dBm) - Minimale Wärmeentwicklung, reduzierte Reichweite
+ * - 1: Normal (11 dBm) - Ausgewogen, moderate Wärmeentwicklung
+ * - 2: Hoch (17 dBm) - Maximale Reichweite, erhöhte Wärmeentwicklung
+ */
+void applyWifiTxPower() {
+  switch (wifiTxPower) {
+    case 1:
+      WiFi.setTxPower(WIFI_POWER_11dBm);
+      Serial.println("[WIFI] Sendestärke: Normal (11 dBm)");
+      break;
+    case 2:
+      WiFi.setTxPower(WIFI_POWER_17dBm);
+      Serial.println("[WIFI] Sendestärke: Hoch (17 dBm)");
+      break;
+    default:
+      WiFi.setTxPower(WIFI_POWER_5dBm);
+      Serial.println("[WIFI] Sendestärke: Niedrig (5 dBm)");
+      break;
+  }
 }
 
 // ============================================================================
@@ -1382,6 +1416,26 @@ void handleWlan() {
     </div>
 
     <div class="card">
+      <h2>WLAN Sendestärke</h2>
+      <label>Sendeleistung</label>
+      <select id="txPower" onchange="showTxPowerWarning(this.value)">
+        <option value="0" )rawliteral";
+  html += wifiTxPower == 0 ? "selected" : "";
+  html += R"rawliteral(>Niedrig (5 dBm) - Empfohlen</option>
+        <option value="1" )rawliteral";
+  html += wifiTxPower == 1 ? "selected" : "";
+  html += R"rawliteral(>Normal (11 dBm)</option>
+        <option value="2" )rawliteral";
+  html += wifiTxPower == 2 ? "selected" : "";
+  html += R"rawliteral(>Hoch (17 dBm)</option>
+      </select>
+      <div id="txPowerWarning" style="display:none;background:#f39c1233;border:1px solid #f39c12;border-radius:8px;padding:0.8rem;margin-top:0.8rem;">
+        <span style="color:#f39c12;">⚠️ Achtung:</span> Höhere Sendeleistung führt zu erhöhter Wärmeentwicklung. Dies kann bei dauerhaftem Betrieb zu Überhitzung führen.
+      </div>
+      <button onclick="saveTxPower()" style="margin-top:0.8rem;">Speichern</button>
+    </div>
+
+    <div class="card">
       <h2>Zeitzone</h2>
       <label>Zeitzone (POSIX Format)</label>
       <select id="timezone" onchange="document.getElementById('tzCustom').style.display = this.value === 'custom' ? 'block' : 'none'">
@@ -1439,6 +1493,12 @@ void handleWlan() {
               document.getElementById('resetCard').style.display = 'none';
             } else {
               // Station Modus (mit Router verbunden)
+              // Farbe für Signalqualität bestimmen
+              var qualityColor = '#4ecca3';  // Standard: grün
+              if (d.rssi < -80) qualityColor = '#e74c3c';  // Schwach: rot
+              else if (d.rssi < -70) qualityColor = '#f39c12';  // Ausreichend: orange
+              else if (d.rssi < -60) qualityColor = '#f1c40f';  // Gut: gelb
+
               s.innerHTML = '<table>' +
                 '<tr><td>Modus</td><td><span class="status connected">Verbunden</span></td></tr>' +
                 '<tr><td>SSID</td><td>' + d.ssid + '</td></tr>' +
@@ -1446,6 +1506,7 @@ void handleWlan() {
                 '<tr><td>MAC Adresse</td><td>)rawliteral";
   html += macAddress;
   html += R"rawliteral(</td></tr>' +
+                '<tr><td>Signalstärke</td><td><span style="color:' + qualityColor + ';">' + d.quality + '</span> (' + d.rssi + ' dBm)</td></tr>' +
                 '</table>';
               document.getElementById('resetCard').style.display = 'block';
             }
@@ -1532,8 +1593,25 @@ void handleWlan() {
         }).then(() => alert('Zeitzone gespeichert!'));
       }
 
+      // Warnung bei höherer Sendeleistung anzeigen
+      function showTxPowerWarning(value) {
+        document.getElementById('txPowerWarning').style.display = (value > 0) ? 'block' : 'none';
+      }
+
+      // Sendestärke speichern
+      function saveTxPower() {
+        let power = parseInt(document.getElementById('txPower').value);
+        fetch('/api/wifi-power', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({power: power})
+        }).then(() => alert('Sendestärke gespeichert! Die Änderung wird sofort wirksam.'));
+      }
+
       // Status beim Laden aktualisieren
       updateStatus();
+      // Warnung initial anzeigen falls nötig
+      showTxPowerWarning(document.getElementById('txPower').value);
     </script>
   )rawliteral";
 
@@ -1730,6 +1808,27 @@ void handleApiTimezone() {
 }
 
 /**
+ * POST /api/wifi-power - WLAN-Sendestärke speichern und anwenden
+ *
+ * Body: {"power": 0}  // 0=Niedrig, 1=Normal, 2=Hoch
+ */
+void handleApiWifiPower() {
+  if (server.hasArg("plain")) {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    uint8_t power = doc["power"].as<uint8_t>();
+
+    // Wert validieren (0-2)
+    if (power > 2) power = 2;
+
+    wifiTxPower = power;
+    saveSettings();
+    applyWifiTxPower();  // Sofort anwenden
+  }
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+/**
  * POST /api/ha-settings - Home Assistant Webhook-Einstellungen speichern
  *
  * Body: {"enabled": true, "url": "http://...", "interval": 60}
@@ -1820,15 +1919,42 @@ void handleScan() {
 /**
  * GET /status - WLAN-Status abfragen
  *
- * @return JSON mit apMode, ssid, ip oder apSSID, apPassword
+ * @return JSON mit apMode, ssid, ip, rssi, quality oder apSSID, apPassword
  */
 void handleStatus() {
-  String json;
+  JsonDocument doc;
+  doc["apMode"] = apMode;
+
   if (apMode) {
-    json = "{\"apMode\":true,\"apSSID\":\"" + apSSID + "\",\"apPassword\":\"" + String(AP_PASSWORD) + "\"}";
+    doc["apSSID"] = apSSID;
+    doc["apPassword"] = AP_PASSWORD;
   } else {
-    json = "{\"apMode\":false,\"ssid\":\"" + WiFi.SSID() + "\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+    doc["ssid"] = WiFi.SSID();
+    doc["ip"] = WiFi.localIP().toString();
+
+    // RSSI (Empfangsstärke) hinzufügen
+    int rssi = WiFi.RSSI();
+    doc["rssi"] = rssi;
+
+    // Menschenlesbare Qualitätsbewertung
+    // Typische RSSI-Werte: -30 (hervorragend) bis -90 (sehr schlecht)
+    String quality;
+    if (rssi >= -50) {
+      quality = "Hervorragend";
+    } else if (rssi >= -60) {
+      quality = "Sehr gut";
+    } else if (rssi >= -70) {
+      quality = "Gut";
+    } else if (rssi >= -80) {
+      quality = "Ausreichend";
+    } else {
+      quality = "Schwach";
+    }
+    doc["quality"] = quality;
   }
+
+  String json;
+  serializeJson(doc, json);
   server.send(200, "application/json", json);
 }
 
@@ -1845,7 +1971,7 @@ void handleConnect() {
 
   // In Station-Modus wechseln
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_5dBm);  // Niedrige Sendeleistung gegen Überhitzung
+  applyWifiTxPower();  // Konfigurierte Sendeleistung anwenden
   WiFi.begin(ssid.c_str(), password.c_str());
 
   // Auf Verbindung warten (max. 15 Sekunden)
@@ -1918,9 +2044,8 @@ void startAP() {
   Serial.println("[AP] WiFi.mode(WIFI_AP) = " + String(modeOk ? "OK" : "FEHLER"));
   delay(200);
 
-  // Sendeleistung reduzieren um Wärmeentwicklung zu minimieren
-  WiFi.setTxPower(WIFI_POWER_5dBm);
-  Serial.println("[AP] TX Power gesetzt auf 5 dBm");
+  // Konfigurierte Sendeleistung anwenden
+  applyWifiTxPower();
 
   // IP-Konfiguration VOR softAP setzen
   IPAddress apIP(192, 168, 4, 1);
@@ -1981,7 +2106,7 @@ bool connectToSavedWiFi() {
 
   // In Station-Modus wechseln
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_5dBm);  // Niedrige Sendeleistung gegen Überhitzung
+  applyWifiTxPower();  // Konfigurierte Sendeleistung anwenden
   WiFi.begin(ssid.c_str(), password.c_str());
 
   // Auf Verbindung warten mit Fortschrittsanzeige
@@ -2054,6 +2179,7 @@ void setupWebServer() {
   server.on("/api/serial", HTTP_POST, handleApiSerial);
   server.on("/api/bms-settings", HTTP_POST, handleApiBmsSettings);
   server.on("/api/timezone", HTTP_POST, handleApiTimezone);
+  server.on("/api/wifi-power", HTTP_POST, handleApiWifiPower);
   server.on("/api/reset-wifi", HTTP_POST, handleApiResetWifi);
   server.on("/api/ha-settings", HTTP_POST, handleApiHaSettings);
   server.on("/api/ha-test", HTTP_POST, handleApiHaTest);

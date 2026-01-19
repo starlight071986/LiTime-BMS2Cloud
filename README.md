@@ -12,6 +12,8 @@ ESP32-C3 Firmware zur Überwachung von LiTime LiFePO4-Batterien via Bluetooth Lo
 - **NTP-Zeitsynchronisation** mit konfigurierbarer Zeitzone
 - **Robuste Fehlerbehandlung** bei Verbindungsabbrüchen (WLAN, BLE, Internet)
 - **LED-Statusanzeige** - Interne LED zeigt Verbindungsstatus durch Blinkmuster
+- **WLAN-Sendestärke** - Konfigurierbar im Webinterface (Niedrig/Normal/Hoch)
+- **Signalqualität-Anzeige** - RSSI in dBm mit menschenlesbarer Bewertung
 
 ## Hardware
 
@@ -59,7 +61,7 @@ pio run --target upload && pio device monitor
 | **Werte** | BMS-Übersicht, detaillierte Werte, Zellspannungen |
 | **Bluetooth** | BMS-Verbindung, MAC-Adresse, Abfrageintervall |
 | **Cloud** | Home Assistant Webhook-Konfiguration |
-| **WLAN** | Netzwerkeinstellungen, Zeitzone |
+| **WLAN** | Netzwerkeinstellungen, Sendestärke, Signalqualität, Zeitzone |
 
 ### Statusleiste
 
@@ -146,9 +148,34 @@ Beispiel: Bei deaktiviertem Bluetooth und deaktivierter Cloud leuchtet die LED d
 |-----------|----------|--------------|
 | BMS MAC | - | MAC-Adresse des BMS (Format: XX:XX:XX:XX:XX:XX) |
 | Abfrageintervall | 20s | Intervall für BMS-Datenabfrage (5-300s) |
+| WLAN Sendestärke | Niedrig | Sendeleistung: Niedrig (5 dBm), Normal (11 dBm), Hoch (17 dBm) |
 | Zeitzone | Berlin | POSIX-Zeitzonenformat |
 | Webhook URL | - | Home Assistant Webhook-URL |
 | Webhook Intervall | 60s | Sendeintervall für Webhook (10-3600s) |
+
+### WLAN Sendestärke
+
+Die Sendeleistung kann im Webinterface unter **WLAN** angepasst werden:
+
+| Stufe | Leistung | Verwendung |
+|-------|----------|------------|
+| **Niedrig** | 5 dBm | Empfohlen - minimale Wärmeentwicklung |
+| **Normal** | 11 dBm | Bei Reichweitenproblemen - moderate Wärme |
+| **Hoch** | 17 dBm | Maximale Reichweite - erhöhte Wärmeentwicklung |
+
+⚠️ **Hinweis:** Höhere Sendeleistung führt zu mehr Wärmeentwicklung. Bei dauerhaftem Betrieb wird "Niedrig" empfohlen.
+
+### Signalqualität
+
+Die aktuelle WLAN-Empfangsstärke wird auf der WLAN-Seite angezeigt:
+
+| RSSI | Bewertung | Farbe |
+|------|-----------|-------|
+| ≥ -50 dBm | Hervorragend | Grün |
+| -51 bis -60 dBm | Sehr gut | Grün |
+| -61 bis -70 dBm | Gut | Gelb |
+| -71 bis -80 dBm | Ausreichend | Orange |
+| < -80 dBm | Schwach | Rot |
 
 ### Datenvalidierung
 
@@ -193,14 +220,15 @@ Das Projekt verwendet `huge_app.csv` für 3MB App-Speicher, um den kombinierten 
 
 ### Energieverbrauch
 
-Die WLAN-Sendeleistung ist auf 5 dBm reduziert, um Wärmeentwicklung zu minimieren. Bei Reichweitenproblemen kann dieser Wert im Code erhöht werden.
+Die WLAN-Sendeleistung ist standardmäßig auf "Niedrig" (5 dBm) eingestellt, um Wärmeentwicklung zu minimieren. Bei Reichweitenproblemen kann die Sendestärke im Webinterface unter **WLAN** erhöht werden.
 
 ## Fehlerbehebung
 
 ### WLAN-Verbindung instabil
 
+- Signalqualität auf der WLAN-Seite prüfen (sollte mindestens "Ausreichend" sein)
+- WLAN-Sendeleistung im Webinterface erhöhen
 - Nähe zum Router prüfen
-- WLAN-Sendeleistung erhöhen (im Code: `WIFI_POWER_8_5dBm` oder höher)
 
 ### BMS wird nicht gefunden
 
