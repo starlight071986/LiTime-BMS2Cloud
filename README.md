@@ -2,6 +2,8 @@
 
 ESP32-C3 Firmware zur Überwachung von LiTime LiFePO4-Batterien via Bluetooth Low Energy (BLE) mit Webinterface und Home Assistant Integration.
 
+Basiert auf der BLE-Bibliothek [Litime_BMS_ESP32](https://github.com/mirosieber/Litime_BMS_ESP32) von [@mirosieber](https://github.com/mirosieber).
+
 ## Funktionen
 
 - **BLE-Verbindung** zum LiTime BMS zur Abfrage aller Batterie-Parameter
