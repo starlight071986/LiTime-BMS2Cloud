@@ -10,7 +10,7 @@ Basiert auf der BLE-Bibliothek [Litime_BMS_ESP32](https://github.com/mirosieber/
 - **Webinterface** zur Anzeige aller BMS-Daten mit automatischer Aktualisierung
 - **Home Assistant Integration** via Webhook (JSON-Datenübertragung)
 - **Access Point Modus** zur Erstkonfiguration ohne bestehende WLAN-Infrastruktur
-- **mDNS-Unterstützung** - erreichbar unter `http://litime-bms.local`
+- **mDNS-Unterstützung** - erreichbar unter `http://LiTime-BMS2Cloud-XXXX.local`
 - **NTP-Zeitsynchronisation** mit konfigurierbarer Zeitzone
 - **Robuste Fehlerbehandlung** bei Verbindungsabbrüchen (WLAN, BLE, Internet)
 - **LED-Statusanzeige** - Interne LED zeigt Verbindungsstatus durch Blinkmuster
@@ -53,6 +53,38 @@ pio run --target upload && pio device monitor
 4. **Browser öffnen**: `http://192.168.4.1`
 5. Auf der **WLAN-Seite** das Heimnetzwerk konfigurieren
 6. Auf der **Bluetooth-Seite** die BMS MAC-Adresse eintragen
+
+## Netzwerk-Identifikation
+
+### Hostname-Aufbau
+
+Der WLAN-Hostname und mDNS-Name werden automatisch aus der MAC-Adresse generiert:
+
+```
+LiTime-BMS2Cloud-XXXX
+```
+
+- **LiTime-BMS2Cloud-** = Fester Präfix
+- **XXXX** = Letzte 4 Zeichen der MAC-Adresse (ohne Doppelpunkte)
+
+**Beispiel:** Bei MAC-Adresse `A4:CF:12:D1:B6:28` → Hostname `LiTime-BMS2Cloud-B628`
+
+### Access Point SSID
+
+Im AP-Modus (Erstkonfiguration) lautet die SSID:
+
+```
+LiTime-BMS-XXXX
+```
+
+**Beispiel:** `LiTime-BMS-B628`
+
+### Erreichbarkeit
+
+| Modus | Adresse |
+|-------|---------|
+| **Station** (verbunden) | `http://LiTime-BMS2Cloud-XXXX.local` oder IP-Adresse |
+| **Access Point** | `http://192.168.4.1` |
 
 ## Webinterface
 
@@ -241,7 +273,7 @@ Die WLAN-Sendeleistung ist standardmäßig auf "Niedrig" (5 dBm) eingestellt, um
 ### Webinterface nicht erreichbar
 
 - IP-Adresse im seriellen Monitor prüfen
-- `http://litime-bms.local` nur im gleichen Netzwerk verfügbar
+- `http://LiTime-BMS2Cloud-XXXX.local` nur im gleichen Netzwerk verfügbar (XXXX = letzte 4 MAC-Stellen)
 - Im AP-Modus: `http://192.168.4.1`
 
 ## Abhängigkeiten

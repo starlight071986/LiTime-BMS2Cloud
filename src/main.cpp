@@ -12,7 +12,7 @@
  * - Responsives Webinterface mit Echtzeit-Aktualisierung (1 Sekunde)
  * - Home Assistant Integration via HTTP Webhook (JSON-Format)
  * - Access Point Modus zur Erstkonfiguration ohne WLAN-Infrastruktur
- * - mDNS-Unterstützung (erreichbar unter http://litime-bms.local)
+ * - mDNS-Unterstützung (erreichbar unter http://LiTime-BMS2Cloud-XXXX.local)
  * - NTP-Zeitsynchronisation mit konfigurierbarer Zeitzone
  * - Robuste Fehlerbehandlung bei Verbindungsabbrüchen
  *
@@ -30,7 +30,7 @@
 #include <Arduino.h>          // Arduino-Kernfunktionen für ESP32
 #include <WiFi.h>             // WLAN-Funktionen (Station und Access Point)
 #include <WebServer.h>        // HTTP-Webserver für das Webinterface
-#include <ESPmDNS.h>          // mDNS für lokale Namensauflösung (litime-bms.local)
+#include <ESPmDNS.h>          // mDNS für lokale Namensauflösung (Hostname.local)
 #include <BMSClient.h>        // BLE-Client für LiTime BMS Kommunikation
 #include <time.h>             // Zeitfunktionen für NTP-Synchronisation
 #include <Preferences.h>      // Persistenter Speicher (NVS) für Einstellungen
@@ -95,6 +95,9 @@ String macAddress;
 
 // SSID für den Access Point Modus (z.B. "LiTime-BMS-AB12")
 String apSSID;
+
+// WLAN-Hostname für Router-Anzeige (z.B. "LiTime-BMS2Cloud-AB12")
+String wifiHostname;
 
 // Aktueller WLAN-Modus: true = Access Point, false = Station (mit Router verbunden)
 bool apMode = false;
@@ -1559,7 +1562,7 @@ void handleWlan() {
             document.getElementById('networks').innerHTML = '<div style="background:#4ecca333;padding:1rem;border-radius:8px;">' +
               '<h3 style="color:#4ecca3;">Verbindung erfolgreich!</h3>' +
               '<p>Neue IP: <strong>' + d.ip + '</strong></p>' +
-              '<p>Erreichbar unter: <a href="http://litime-bms.local" style="color:#4ecca3;">http://litime-bms.local</a></p>' +
+              '<p>Erreichbar unter: <a href="http://)rawliteral" + wifiHostname + R"rawliteral(.local" style="color:#4ecca3;">http://)rawliteral" + wifiHostname + R"rawliteral(.local</a></p>' +
               '</div>';
             setTimeout(() => location.reload(), 3000);
           } else {
@@ -1971,6 +1974,7 @@ void handleConnect() {
 
   // In Station-Modus wechseln
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(wifiHostname.c_str());  // Hostname für Router setzen
   applyWifiTxPower();  // Konfigurierte Sendeleistung anwenden
   WiFi.begin(ssid.c_str(), password.c_str());
 
@@ -1990,8 +1994,8 @@ void handleConnect() {
 
     apMode = false;
 
-    // mDNS starten für litime-bms.local
-    MDNS.begin("litime-bms");
+    // mDNS starten für Hostname.local
+    MDNS.begin(wifiHostname.c_str());
 
     String json = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\",\"ssid\":\"" + ssid + "\"}";
     server.send(200, "application/json", json);
@@ -2106,6 +2110,7 @@ bool connectToSavedWiFi() {
 
   // In Station-Modus wechseln
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(wifiHostname.c_str());  // Hostname für Router setzen
   applyWifiTxPower();  // Konfigurierte Sendeleistung anwenden
   WiFi.begin(ssid.c_str(), password.c_str());
 
@@ -2135,9 +2140,9 @@ bool connectToSavedWiFi() {
     Serial.println("[WIFI]   RSSI: " + String(WiFi.RSSI()) + " dBm");
     Serial.println("[WIFI] ══════════════════════════════════════");
 
-    // mDNS starten für litime-bms.local
-    if (MDNS.begin("litime-bms")) {
-      Serial.println("[WIFI] mDNS gestartet: http://litime-bms.local");
+    // mDNS starten für Hostname.local
+    if (MDNS.begin(wifiHostname.c_str())) {
+      Serial.println("[WIFI] mDNS gestartet: http://" + wifiHostname + ".local");
     }
 
     return true;
@@ -2253,16 +2258,18 @@ void setup() {
   loadSettings();
   Serial.println("[INIT] Einstellungen geladen");
 
-  // MAC-Adresse auslesen für eindeutige AP-SSID
+  // MAC-Adresse auslesen für eindeutige AP-SSID und Hostname
   Serial.println("[INIT] Lese MAC-Adresse...");
   macAddress = WiFi.macAddress();
-  // Letzten 4 Zeichen der MAC für SSID verwenden (ohne Doppelpunkte)
+  // Letzten 4 Zeichen der MAC für SSID/Hostname verwenden (ohne Doppelpunkte)
   String macSuffix = macAddress.substring(macAddress.length() - 5);
   macSuffix.replace(":", "");
   apSSID = "LiTime-BMS-" + macSuffix;
+  wifiHostname = "LiTime-BMS2Cloud-" + macSuffix;
 
   Serial.println("[INIT] MAC: " + macAddress);
-  Serial.println("[INIT] AP-SSID wird: " + apSSID);
+  Serial.println("[INIT] AP-SSID: " + apSSID);
+  Serial.println("[INIT] Hostname: " + wifiHostname);
   Serial.println();
 
   // WLAN-Verbindung herstellen oder Access Point starten
@@ -2370,7 +2377,7 @@ void loop() {
       if (WiFi.status() == WL_CONNECTED) {
         // Reconnect erfolgreich
         Serial.println("[WIFI] Reconnect erfolgreich! IP: " + WiFi.localIP().toString());
-        MDNS.begin("litime-bms");  // mDNS neu starten
+        MDNS.begin(wifiHostname.c_str());  // mDNS neu starten
         wifiReconnecting = false;
       } else if (currentMillis - wifiReconnectStart > 15000) {
         // Timeout nach 15 Sekunden
