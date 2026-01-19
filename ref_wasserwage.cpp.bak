@@ -1,0 +1,917 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <Adafruit_MMA8451.h>
+#include <Adafruit_Sensor.h>
+
+#define SDA_PIN 8
+#define SCL_PIN 9
+#define AP_PASSWORD "EinfachMessen"
+#define WIFI_TIMEOUT_MS 60000
+#define DNS_PORT 53
+
+Adafruit_MMA8451 mma = Adafruit_MMA8451();
+WebServer server(80);
+DNSServer dnsServer;
+Preferences preferences;
+
+String macAddress;
+String apSSID;
+bool apMode = false;
+float angleX = 0;
+float angleY = 0;
+
+// Kalibrierungseinstellungen
+float offsetX = 0;
+float offsetY = 0;
+bool invertX = false;
+bool invertY = false;
+float circleRange = 15.0;  // Standardwert 15 Grad
+float centerTolerance = 0.2;  // Toleranz für "mittig" in Grad
+String vehicleName = "";  // Kosename des Fahrzeugs
+
+// Forward-Deklarationen
+void startAP();
+bool connectToSavedWiFi();
+void loadSettings();
+void saveSettings();
+
+// HTML für die Hauptseite (Neigungsanzeige)
+const char* htmlMain = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Digitale Wasserwaage</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; margin: 20px; background: #1a1a2e; color: #eee; }
+    .container { max-width: 400px; margin: 0 auto; }
+    h1 { color: #00d4ff; }
+    .levels { display: flex; gap: 10px; margin: 20px 0; }
+    .level { background: #16213e; border-radius: 15px; padding: 15px; flex: 1; }
+    .angle { font-size: 32px; font-weight: bold; color: #00d4ff; }
+    .label { font-size: 18px; color: #888; margin-bottom: 10px; }
+    .view-container { position: relative; margin: 20px auto; }
+    .indicator { width: 200px; height: 200px; border: 3px solid #00d4ff; border-radius: 50%; margin: 0 auto; position: relative; background: #0f0f23; overflow: hidden; }
+    .bubble { width: 30px; height: 30px; background: #00ff88; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: all 0.1s; z-index: 2; }
+    .crosshair-v, .crosshair-h { position: absolute; transition: background 0.2s; }
+    .crosshair-v { width: 2px; height: 100%; left: 50%; top: 0; transform: translateX(-50%); background: #444; }
+    .crosshair-h { height: 2px; width: 100%; top: 50%; left: 0; transform: translateY(-50%); background: #444; }
+    .crosshair-v.level-ok, .crosshair-h.level-ok { background: #00ff88; }
+    .level.level-ok { border: 2px solid #00ff88; }
+    .indicator.level-ok { border-color: #00ff88; }
+    .camper-view { width: 280px; height: 180px; margin: 0 auto; position: relative; display: none; }
+    .camper-svg { width: 100%; height: 100%; }
+    .hint-box { background: #16213e; border-radius: 10px; padding: 15px; margin: 15px 0; }
+    .hint-title { font-size: 14px; color: #888; margin-bottom: 8px; }
+    .hint-text { font-size: 18px; color: #00ff88; font-weight: bold; }
+    .hint-text.level-ok { color: #00ff88; }
+    .hint-text.needs-adjust { color: #ffaa00; }
+    .mode-switch { margin: 15px 0; }
+    .mode-btn { padding: 10px 20px; margin: 0 5px; border: 2px solid #00d4ff; background: transparent; color: #00d4ff; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
+    .mode-btn.active { background: #00d4ff; color: #000; }
+    .mode-btn:hover { background: #00d4ff44; }
+    .mac { font-size: 12px; color: #666; margin-top: 20px; }
+    .range-info { font-size: 14px; color: #888; margin-top: 10px; }
+    .nav { display: flex; gap: 10px; justify-content: center; margin-top: 25px; flex-wrap: wrap; }
+    .nav a { display: inline-block; padding: 12px 20px; background: #16213e; color: #00d4ff; text-decoration: none; border-radius: 8px; font-size: 14px; transition: background 0.2s; }
+    .nav a:hover { background: #1f3460; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 style="margin-bottom:5px">Digitale Wasserwaage</h1>
+    <p id="vehicleSubtitle" style="color:#00d4ff;margin-top:0;margin-bottom:15px;font-size:16px;font-weight:500;display:none"></p>
+
+    <div class="mode-switch">
+      <button class="mode-btn active" id="btnLibelle" onclick="setMode('libelle')">Libelle</button>
+      <button class="mode-btn" id="btnCamper" onclick="setMode('camper')">Wohnmobil</button>
+    </div>
+
+    <div class="view-container">
+      <!-- Libellen-Ansicht -->
+      <div id="libelleView">
+        <div class="indicator" id="indicator">
+          <div class="crosshair-v" id="crosshairV"></div>
+          <div class="crosshair-h" id="crosshairH"></div>
+          <div class="bubble" id="bubble"></div>
+        </div>
+        <div class="range-info">Anzeigebereich: <span id="range">15</span>°</div>
+      </div>
+
+      <!-- Wohnmobil-Ansicht -->
+      <div id="camperView" class="camper-view">
+        <svg class="camper-svg" viewBox="0 0 280 180" id="camperSvg">
+          <!-- Wohnmobil Umriss -->
+          <g id="camperBody" stroke="#00d4ff" stroke-width="2" fill="none">
+            <!-- Hauptkarosserie -->
+            <path d="M30 130 L30 70 L80 70 L80 50 L250 50 L250 130 Z" />
+            <!-- Fahrerhaus -->
+            <path d="M30 70 L30 55 Q30 45 40 45 L70 45 Q80 45 80 55 L80 70" />
+            <!-- Fenster Fahrerhaus -->
+            <rect x="35" y="52" width="40" height="15" rx="2" stroke="#00d4ff" stroke-width="1.5" />
+            <!-- Fenster hinten -->
+            <rect x="180" y="60" width="50" height="25" rx="2" stroke="#00d4ff" stroke-width="1.5" />
+            <!-- Tuer -->
+            <rect x="100" y="65" width="30" height="55" rx="2" stroke="#00d4ff" stroke-width="1.5" />
+            <!-- Raeder -->
+            <circle cx="60" cy="130" r="18" stroke="#00d4ff" stroke-width="2" />
+            <circle cx="60" cy="130" r="10" stroke="#00d4ff" stroke-width="1" />
+            <circle cx="220" cy="130" r="18" stroke="#00d4ff" stroke-width="2" />
+            <circle cx="220" cy="130" r="10" stroke="#00d4ff" stroke-width="1" />
+          </g>
+          <!-- Richtungspfeile -->
+          <text x="140" y="25" fill="#666" font-size="12" text-anchor="middle">VORNE</text>
+          <text x="140" y="175" fill="#666" font-size="12" text-anchor="middle">HINTEN</text>
+          <text x="5" y="95" fill="#666" font-size="10" text-anchor="middle" transform="rotate(-90 10 95)">LINKS</text>
+          <text x="275" y="95" fill="#666" font-size="10" text-anchor="middle" transform="rotate(90 270 95)">RECHTS</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Hinweis-Box -->
+    <div class="hint-box" id="hintBox">
+      <div class="hint-title">Anpassung erforderlich:</div>
+      <div class="hint-text" id="hintText">Waage ist eben</div>
+    </div>
+
+    <div class="levels">
+      <div class="level" id="levelX">
+        <div class="label">Links/Rechts</div>
+        <div class="angle" id="angleX">0.0°</div>
+      </div>
+      <div class="level" id="levelY">
+        <div class="label">Vorne/Hinten</div>
+        <div class="angle" id="angleY">0.0°</div>
+      </div>
+    </div>
+    <div class="nav">
+      <a href="/settings">Einstellungen</a>
+      <a href="/config">WLAN</a>
+    </div>
+    <p class="mac">MAC: <span id="mac"></span></p>
+    <p style="font-size:11px;color:#555;margin-top:15px">Made with ❤️ by Marcel Mayer</p>
+  </div>
+  <script>
+    var circleRange = 15;
+    var currentMode = 'libelle';
+    var threshold = 0.5; // Grad Toleranz
+
+    function setMode(mode) {
+      currentMode = mode;
+      document.getElementById('btnLibelle').classList.toggle('active', mode === 'libelle');
+      document.getElementById('btnCamper').classList.toggle('active', mode === 'camper');
+      document.getElementById('libelleView').style.display = mode === 'libelle' ? 'block' : 'none';
+      document.getElementById('camperView').style.display = mode === 'camper' ? 'block' : 'none';
+    }
+
+    function updateHint(x, y) {
+      var hints = [];
+      var isLevel = true;
+
+      // X-Achse: positiv = rechts runter, negativ = links runter
+      if (Math.abs(x) > threshold) {
+        isLevel = false;
+        if (x > 0) {
+          hints.push('LINKS anheben');
+        } else {
+          hints.push('RECHTS anheben');
+        }
+      }
+
+      // Y-Achse: positiv = hinten runter, negativ = vorne runter
+      if (Math.abs(y) > threshold) {
+        isLevel = false;
+        if (y > 0) {
+          hints.push('VORNE anheben');
+        } else {
+          hints.push('HINTEN anheben');
+        }
+      }
+
+      var hintText = document.getElementById('hintText');
+      if (isLevel) {
+        hintText.textContent = 'Waage ist eben!';
+        hintText.className = 'hint-text level-ok';
+      } else {
+        hintText.textContent = hints.join(' + ');
+        hintText.className = 'hint-text needs-adjust';
+      }
+    }
+
+    function updateCamperTilt(x, y) {
+      var camper = document.getElementById('camperBody');
+      // Rotation begrenzen fuer bessere Darstellung
+      var rotX = Math.max(-15, Math.min(15, x));
+      var rotY = Math.max(-15, Math.min(15, y));
+      camper.style.transform = 'rotate(' + rotX + 'deg)';
+      camper.style.transformOrigin = 'center center';
+    }
+
+    function updateData() {
+      fetch('/data')
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('angleX').textContent = d.x.toFixed(1) + '°';
+          document.getElementById('angleY').textContent = d.y.toFixed(1) + '°';
+          document.getElementById('mac').textContent = d.mac;
+          document.getElementById('range').textContent = d.range;
+          circleRange = d.range;
+          var tol = d.tolerance || 0.2;
+
+          // Fahrzeugname anzeigen
+          var subtitle = document.getElementById('vehicleSubtitle');
+          if (d.vehicle && d.vehicle.length > 0) {
+            subtitle.textContent = 'von ' + d.vehicle;
+            subtitle.style.display = 'block';
+          } else {
+            subtitle.style.display = 'none';
+          }
+
+          // Libellen-Bubble aktualisieren
+          var bx = Math.max(-circleRange, Math.min(circleRange, d.x)) / circleRange * 80;
+          var by = Math.max(-circleRange, Math.min(circleRange, d.y)) / circleRange * 80;
+          document.getElementById('bubble').style.transform = 'translate(calc(-50% + ' + bx + 'px), calc(-50% + ' + by + 'px))';
+
+          // Fadenkreuz und Cards aktualisieren (mittig = innerhalb Toleranz)
+          var xLevel = Math.abs(d.x) <= tol;
+          var yLevel = Math.abs(d.y) <= tol;
+          document.getElementById('crosshairV').classList.toggle('level-ok', xLevel);
+          document.getElementById('crosshairH').classList.toggle('level-ok', yLevel);
+          document.getElementById('levelX').classList.toggle('level-ok', xLevel);
+          document.getElementById('levelY').classList.toggle('level-ok', yLevel);
+          document.getElementById('indicator').classList.toggle('level-ok', xLevel && yLevel);
+
+          // Hinweise aktualisieren
+          updateHint(d.x, d.y);
+
+          // Wohnmobil-Neigung aktualisieren
+          updateCamperTilt(d.x, d.y);
+        });
+    }
+    setInterval(updateData, 200);
+    updateData();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// HTML für die WLAN-Konfigurationsseite
+const char* htmlConfig = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WLAN Konfiguration</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; margin: 20px; background: #1a1a2e; color: #eee; }
+    .container { max-width: 400px; margin: 0 auto; }
+    h1 { color: #00d4ff; }
+    .network { background: #16213e; border-radius: 10px; padding: 15px; margin: 10px 0; cursor: pointer; }
+    .network:hover { background: #1f3460; }
+    .ssid { font-weight: bold; }
+    .rssi { color: #888; font-size: 14px; }
+    button { background: #00d4ff; color: #000; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 10px; }
+    button:hover { background: #00b8e6; }
+    .btn-danger { background: #ff4444; }
+    .btn-danger:hover { background: #cc3333; }
+    input { padding: 12px; width: 80%; border-radius: 5px; border: 1px solid #444; background: #0f0f23; color: #eee; font-size: 16px; margin: 10px 0; }
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100; }
+    .modal-content { background: #16213e; margin: 15% auto; padding: 20px; border-radius: 15px; max-width: 320px; }
+    .status { margin: 20px 0; padding: 15px; border-radius: 10px; }
+    .connected { background: #00ff8833; }
+    .ap-mode { background: #ff880033; }
+    .success-msg { background: #00ff8833; padding: 20px; border-radius: 10px; margin: 20px 0; }
+    .nav { display: flex; gap: 10px; justify-content: center; margin-top: 25px; flex-wrap: wrap; }
+    .nav a { display: inline-block; padding: 12px 20px; background: #16213e; color: #00d4ff; text-decoration: none; border-radius: 8px; font-size: 14px; transition: background 0.2s; }
+    .nav a:hover { background: #1f3460; }
+    .reset-section { display: none; margin-top: 20px; padding-top: 20px; border-top: 1px solid #333; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WLAN Konfiguration</h1>
+    <div id="status" class="status"></div>
+    <div id="successMsg" style="display:none;" class="success-msg"></div>
+    <button onclick="scanNetworks()">Netzwerke suchen</button>
+    <div id="networks"></div>
+    <div id="resetSection" class="reset-section">
+      <button class="btn-danger" onclick="resetWiFi()">WLAN zurücksetzen</button>
+    </div>
+    <div class="nav">
+      <a href="/">Wasserwaage</a>
+      <a href="/settings">Einstellungen</a>
+    </div>
+  </div>
+  <div id="modal" class="modal">
+    <div class="modal-content">
+      <h3 id="selectedSSID"></h3>
+      <input type="password" id="password" placeholder="Passwort">
+      <br>
+      <button onclick="connect()">Verbinden</button>
+      <button onclick="closeModal()">Abbrechen</button>
+    </div>
+  </div>
+  <script>
+    var selectedSSID = '';
+    var isApMode = false;
+
+    function updateStatus() {
+      fetch('/status')
+        .then(r => r.json())
+        .then(d => {
+          var s = document.getElementById('status');
+          isApMode = d.apMode;
+          if (d.apMode) {
+            s.className = 'status ap-mode';
+            s.innerHTML = '<strong>Access Point Modus</strong><br><br>SSID: <strong>' + d.apSSID + '</strong><br>Passwort: <strong>' + d.apPassword + '</strong>';
+            document.getElementById('resetSection').style.display = 'none';
+          } else {
+            s.className = 'status connected';
+            s.innerHTML = '<strong>Verbunden</strong><br><br>Netzwerk: <strong>' + d.ssid + '</strong><br>IP: <strong>' + d.ip + '</strong>';
+            document.getElementById('resetSection').style.display = 'block';
+          }
+        });
+    }
+
+    function scanNetworks() {
+      document.getElementById('networks').innerHTML = 'Suche...';
+      fetch('/scan')
+        .then(r => r.json())
+        .then(d => {
+          var html = '';
+          d.forEach(n => {
+            html += '<div class="network" onclick="selectNetwork(\'' + n.ssid.replace(/'/g, "\\'") + '\')"><div class="ssid">' + n.ssid + '</div><div class="rssi">Signal: ' + n.rssi + ' dBm</div></div>';
+          });
+          document.getElementById('networks').innerHTML = html || 'Keine Netzwerke gefunden';
+        });
+    }
+
+    function selectNetwork(ssid) {
+      selectedSSID = ssid;
+      document.getElementById('selectedSSID').textContent = ssid;
+      document.getElementById('password').value = '';
+      document.getElementById('modal').style.display = 'block';
+    }
+
+    function closeModal() {
+      document.getElementById('modal').style.display = 'none';
+    }
+
+    function connect() {
+      var pw = document.getElementById('password').value;
+      document.getElementById('modal').innerHTML = '<div class="modal-content"><p>Verbinde...</p></div>';
+      fetch('/connect', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'ssid=' + encodeURIComponent(selectedSSID) + '&password=' + encodeURIComponent(pw)
+      })
+      .then(r => r.json())
+      .then(d => {
+        closeModal();
+        if (d.success) {
+          document.getElementById('networks').innerHTML = '';
+          document.getElementById('successMsg').style.display = 'block';
+          document.getElementById('successMsg').innerHTML =
+            '<h3>Verbindung erfolgreich!</h3>' +
+            '<p>Das Gerät ist jetzt mit <strong>' + selectedSSID + '</strong> verbunden.</p>' +
+            '<p>Neue IP-Adresse: <strong>' + d.ip + '</strong></p>' +
+            '<hr style="border-color:#00d4ff44">' +
+            '<p>Sie können das Gerät jetzt erreichen unter:</p>' +
+            '<p><a href="http://digitalewasserwage.local">http://digitalewasserwage.local</a></p>' +
+            '<p>oder</p>' +
+            '<p><a href="http://' + d.ip + '">http://' + d.ip + '</a></p>' +
+            '<p style="color:#888;font-size:12px;margin-top:20px">Bitte wechseln Sie in Ihrem Gerät zum Netzwerk "' + selectedSSID + '" um fortzufahren.</p>';
+          document.getElementById('status').style.display = 'none';
+        } else {
+          alert('Verbindung fehlgeschlagen: ' + d.message);
+          location.reload();
+        }
+      });
+    }
+
+    function resetWiFi() {
+      if (confirm('WLAN-Zugangsdaten wirklich löschen?')) {
+        fetch('/reset', { method: 'POST' })
+          .then(r => r.json())
+          .then(d => {
+            alert('WLAN-Daten gelöscht. Das Gerät startet im Access Point Modus neu.');
+            setTimeout(() => location.reload(), 2000);
+          });
+      }
+    }
+
+    updateStatus();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// HTML für die Wasserwaage-Einstellungsseite
+const char* htmlSettings = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wasserwaage Einstellungen</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; margin: 20px; background: #1a1a2e; color: #eee; }
+    .container { max-width: 400px; margin: 0 auto; }
+    h1 { color: #00d4ff; }
+    h2 { color: #00d4ff; font-size: 18px; margin-top: 30px; }
+    .setting { background: #16213e; border-radius: 10px; padding: 15px; margin: 15px 0; text-align: left; }
+    .setting label { display: block; margin-bottom: 10px; color: #888; }
+    .setting input[type="number"] { padding: 10px; width: 80px; border-radius: 5px; border: 1px solid #444; background: #0f0f23; color: #eee; font-size: 16px; }
+    .setting input[type="checkbox"] { width: 20px; height: 20px; margin-right: 10px; }
+    .checkbox-label { display: flex; align-items: center; margin: 10px 0; }
+    button { background: #00d4ff; color: #000; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; font-size: 16px; margin: 5px; }
+    button:hover { background: #00b8e6; }
+    .btn-small { padding: 8px 16px; font-size: 14px; }
+    .btn-danger { background: #ff4444; }
+    .btn-danger:hover { background: #cc3333; }
+    .btn-success { background: #00ff88; }
+    .btn-success:hover { background: #00cc6a; }
+    .current-values { background: #0f0f23; padding: 15px; border-radius: 10px; margin: 15px 0; }
+    .current-values .value { font-size: 24px; color: #00d4ff; font-weight: bold; }
+    .offset-info { background: #ff880033; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; }
+    .nav { display: flex; gap: 10px; justify-content: center; margin-top: 25px; flex-wrap: wrap; }
+    .nav a { display: inline-block; padding: 12px 20px; background: #16213e; color: #00d4ff; text-decoration: none; border-radius: 8px; font-size: 14px; transition: background 0.2s; }
+    .nav a:hover { background: #1f3460; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Wasserwaage Einstellungen</h1>
+
+    <div class="current-values">
+      <div>Aktuelle Neigung</div>
+      <div>X: <span class="value" id="currentX">0.0</span>° | Y: <span class="value" id="currentY">0.0</span>°</div>
+    </div>
+
+    <h2>Verbaut in</h2>
+    <div class="setting">
+      <label>Kosename des Fahrzeugs</label>
+      <input type="text" id="vehicleName" value="" maxlength="32" style="width:200px;padding:10px;border-radius:5px;border:1px solid #444;background:#0f0f23;color:#eee;font-size:16px">
+      <p style="color:#666;font-size:12px;margin-top:10px">Wird auf der Hauptseite unter dem Titel angezeigt</p>
+    </div>
+
+    <h2>Anzeigebereich</h2>
+    <div class="setting">
+      <label>Kreis-Gradzahl (Bereich der Libelle)</label>
+      <input type="number" id="circleRange" value="15" min="1" max="90" step="1"> °
+      <p style="color:#666;font-size:12px;margin-top:10px">Bestimmt, bei welcher Neigung die Libelle den Rand erreicht</p>
+    </div>
+
+    <h2>Mittentoleranz</h2>
+    <div class="setting">
+      <label>Toleranz für "mittig" (grüne Anzeige)</label>
+      <input type="number" id="tolerance" value="0.2" min="0.1" max="5" step="0.1"> °
+      <p style="color:#666;font-size:12px;margin-top:10px">Abweichung in Grad, ab der die Anzeige als "mittig" gilt</p>
+    </div>
+
+    <h2>Achsen invertieren</h2>
+    <div class="setting">
+      <div class="checkbox-label">
+        <input type="checkbox" id="invertX">
+        <label>X-Achse invertieren</label>
+      </div>
+      <div class="checkbox-label">
+        <input type="checkbox" id="invertY">
+        <label>Y-Achse invertieren</label>
+      </div>
+    </div>
+
+    <h2>Kalibrierung (Nullpunkt)</h2>
+    <div class="setting">
+      <p style="color:#888;font-size:14px">Setzt den aktuellen Winkel als neuen Nullpunkt</p>
+      <button class="btn-small btn-success" onclick="zeroX()">X nullen</button>
+      <button class="btn-small btn-success" onclick="zeroY()">Y nullen</button>
+      <button class="btn-small btn-success" onclick="zeroBoth()">Beide nullen</button>
+      <div id="offsetInfo" class="offset-info" style="display:none">
+        <strong>Aktuelle Offsets:</strong><br>
+        X: <span id="offsetX">0</span>° | Y: <span id="offsetY">0</span>°
+        <br><br>
+        <button class="btn-small btn-danger" onclick="resetOffset()">Offsets zurücksetzen</button>
+      </div>
+    </div>
+
+    <hr style="border-color: #333; margin: 30px 0;">
+    <button onclick="saveSettings()">Einstellungen speichern</button>
+
+    <div class="nav">
+      <a href="/">Wasserwaage</a>
+      <a href="/config">WLAN</a>
+    </div>
+  </div>
+  <script>
+    function loadSettings() {
+      fetch('/getsettings')
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('vehicleName').value = d.vehicle || '';
+          document.getElementById('circleRange').value = d.range;
+          document.getElementById('tolerance').value = d.tolerance;
+          document.getElementById('invertX').checked = d.invertX;
+          document.getElementById('invertY').checked = d.invertY;
+          document.getElementById('offsetX').textContent = d.offsetX.toFixed(1);
+          document.getElementById('offsetY').textContent = d.offsetY.toFixed(1);
+          if (d.offsetX != 0 || d.offsetY != 0) {
+            document.getElementById('offsetInfo').style.display = 'block';
+          }
+        });
+    }
+
+    function updateCurrentValues() {
+      fetch('/data')
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('currentX').textContent = d.x.toFixed(1);
+          document.getElementById('currentY').textContent = d.y.toFixed(1);
+        });
+    }
+
+    function saveSettings() {
+      var vehicle = document.getElementById('vehicleName').value;
+      var range = document.getElementById('circleRange').value;
+      var tolerance = document.getElementById('tolerance').value;
+      var invertX = document.getElementById('invertX').checked;
+      var invertY = document.getElementById('invertY').checked;
+      fetch('/savesettings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'vehicle=' + encodeURIComponent(vehicle) + '&range=' + range + '&tolerance=' + tolerance + '&invertX=' + invertX + '&invertY=' + invertY
+      })
+      .then(r => r.json())
+      .then(d => {
+        alert('Einstellungen gespeichert!');
+      });
+    }
+
+    function zeroX() {
+      fetch('/zero?axis=x', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('offsetX').textContent = d.offsetX.toFixed(1);
+          document.getElementById('offsetInfo').style.display = 'block';
+        });
+    }
+
+    function zeroY() {
+      fetch('/zero?axis=y', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('offsetY').textContent = d.offsetY.toFixed(1);
+          document.getElementById('offsetInfo').style.display = 'block';
+        });
+    }
+
+    function zeroBoth() {
+      fetch('/zero?axis=both', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('offsetX').textContent = d.offsetX.toFixed(1);
+          document.getElementById('offsetY').textContent = d.offsetY.toFixed(1);
+          document.getElementById('offsetInfo').style.display = 'block';
+        });
+    }
+
+    function resetOffset() {
+      fetch('/zero?axis=reset', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+          document.getElementById('offsetX').textContent = '0.0';
+          document.getElementById('offsetY').textContent = '0.0';
+          document.getElementById('offsetInfo').style.display = 'none';
+        });
+    }
+
+    loadSettings();
+    updateCurrentValues();
+    setInterval(updateCurrentValues, 500);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+  server.send(200, "text/html", htmlMain);
+}
+
+void handleConfig() {
+  server.send(200, "text/html", htmlConfig);
+}
+
+void handleSettings() {
+  server.send(200, "text/html", htmlSettings);
+}
+
+void handleData() {
+  String json = "{\"x\":" + String(angleX, 1) + ",\"y\":" + String(angleY, 1) + ",\"mac\":\"" + macAddress + "\",\"range\":" + String(circleRange, 0) + ",\"tolerance\":" + String(centerTolerance, 2) + ",\"vehicle\":\"" + vehicleName + "\"}";
+  server.send(200, "application/json", json);
+}
+
+void handleGetSettings() {
+  String json = "{\"range\":" + String(circleRange, 0) +
+                ",\"invertX\":" + (invertX ? "true" : "false") +
+                ",\"invertY\":" + (invertY ? "true" : "false") +
+                ",\"offsetX\":" + String(offsetX, 1) +
+                ",\"offsetY\":" + String(offsetY, 1) +
+                ",\"tolerance\":" + String(centerTolerance, 2) +
+                ",\"vehicle\":\"" + vehicleName + "\"}";
+  server.send(200, "application/json", json);
+}
+
+void handleSaveSettings() {
+  if (server.hasArg("vehicle")) {
+    vehicleName = server.arg("vehicle");
+    vehicleName.trim();
+    if (vehicleName.length() > 32) vehicleName = vehicleName.substring(0, 32);
+  }
+  if (server.hasArg("range")) {
+    circleRange = server.arg("range").toFloat();
+    if (circleRange < 1) circleRange = 1;
+    if (circleRange > 90) circleRange = 90;
+  }
+  if (server.hasArg("invertX")) {
+    invertX = (server.arg("invertX") == "true");
+  }
+  if (server.hasArg("invertY")) {
+    invertY = (server.arg("invertY") == "true");
+  }
+  if (server.hasArg("tolerance")) {
+    centerTolerance = server.arg("tolerance").toFloat();
+    if (centerTolerance < 0.1) centerTolerance = 0.1;
+    if (centerTolerance > 5.0) centerTolerance = 5.0;
+  }
+  saveSettings();
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleZero() {
+  String axis = server.arg("axis");
+
+  // Rohe Winkel berechnen (ohne aktuellen Offset, X/Y vertauscht wegen 90° gedrehtem Sensor)
+  sensors_event_t event;
+  mma.getEvent(&event);
+  float rawX = atan2(event.acceleration.y, event.acceleration.z) * 180.0 / PI;  // Y-Sensor -> X-Anzeige
+  float rawY = atan2(event.acceleration.x, event.acceleration.z) * 180.0 / PI;  // X-Sensor -> Y-Anzeige
+
+  if (axis == "x") {
+    offsetX = rawX;
+  } else if (axis == "y") {
+    offsetY = rawY;
+  } else if (axis == "both") {
+    offsetX = rawX;
+    offsetY = rawY;
+  } else if (axis == "reset") {
+    offsetX = 0;
+    offsetY = 0;
+  }
+
+  saveSettings();
+
+  String json = "{\"offsetX\":" + String(offsetX, 1) + ",\"offsetY\":" + String(offsetY, 1) + "}";
+  server.send(200, "application/json", json);
+}
+
+void handleStatus() {
+  String json;
+  if (apMode) {
+    json = "{\"apMode\":true,\"apSSID\":\"" + apSSID + "\",\"apPassword\":\"" + String(AP_PASSWORD) + "\"}";
+  } else {
+    json = "{\"apMode\":false,\"ssid\":\"" + WiFi.SSID() + "\",\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+  }
+  server.send(200, "application/json", json);
+}
+
+void handleScan() {
+  int n = WiFi.scanNetworks();
+  String json = "[";
+  for (int i = 0; i < n; i++) {
+    if (i > 0) json += ",";
+    String ssid = WiFi.SSID(i);
+    ssid.replace("\"", "\\\"");
+    json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+void handleConnect() {
+  String ssid = server.arg("ssid");
+  String password = server.arg("password");
+
+  Serial.println("Verbinde mit: " + ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // Credentials speichern
+    preferences.begin("wifi", false);
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", password);
+    preferences.end();
+
+    apMode = false;
+
+    // mDNS starten
+    MDNS.begin("digitalewasserwage");
+
+    String json = "{\"success\":true,\"ip\":\"" + WiFi.localIP().toString() + "\",\"ssid\":\"" + ssid + "\"}";
+    server.send(200, "application/json", json);
+    Serial.println("\nVerbunden! IP: " + WiFi.localIP().toString());
+  } else {
+    // Zurück in AP-Modus
+    startAP();
+    server.send(200, "application/json", "{\"success\":false,\"message\":\"Verbindung fehlgeschlagen\"}");
+  }
+}
+
+void handleReset() {
+  preferences.begin("wifi", false);
+  preferences.clear();
+  preferences.end();
+
+  server.send(200, "application/json", "{\"success\":true}");
+
+  delay(1000);
+  ESP.restart();
+}
+
+// Captive Portal: alle unbekannten Anfragen zur Hauptseite umleiten
+void handleNotFound() {
+  if (apMode) {
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
+  } else {
+    server.send(404, "text/plain", "Not found");
+  }
+}
+
+void startAP() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSSID.c_str(), AP_PASSWORD);
+  apMode = true;
+
+  // DNS Server für Captive Portal starten
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+  Serial.println("AP gestartet: " + apSSID);
+  Serial.println("IP: " + WiFi.softAPIP().toString());
+}
+
+bool connectToSavedWiFi() {
+  preferences.begin("wifi", true);
+  String ssid = preferences.getString("ssid", "");
+  String password = preferences.getString("password", "");
+  preferences.end();
+
+  if (ssid.length() == 0) {
+    Serial.println("Keine gespeicherten WLAN-Daten");
+    return false;
+  }
+
+  Serial.println("Verbinde mit gespeichertem WLAN: " + ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), password.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nVerbunden! IP: " + WiFi.localIP().toString());
+
+    // mDNS starten
+    if (MDNS.begin("digitalewasserwage")) {
+      Serial.println("mDNS gestartet: http://digitalewasserwage.local");
+    }
+
+    return true;
+  }
+
+  Serial.println("\nVerbindung fehlgeschlagen");
+  return false;
+}
+
+void loadSettings() {
+  preferences.begin("level", true);
+  circleRange = preferences.getFloat("range", 15.0);
+  invertX = preferences.getBool("invertX", false);
+  invertY = preferences.getBool("invertY", false);
+  offsetX = preferences.getFloat("offsetX", 0.0);
+  offsetY = preferences.getFloat("offsetY", 0.0);
+  centerTolerance = preferences.getFloat("tolerance", 0.2);
+  vehicleName = preferences.getString("vehicle", "");
+  preferences.end();
+}
+
+void saveSettings() {
+  preferences.begin("level", false);
+  preferences.putFloat("range", circleRange);
+  preferences.putBool("invertX", invertX);
+  preferences.putBool("invertY", invertY);
+  preferences.putFloat("offsetX", offsetX);
+  preferences.putFloat("offsetY", offsetY);
+  preferences.putFloat("tolerance", centerTolerance);
+  preferences.putString("vehicle", vehicleName);
+  preferences.end();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);  // Kurze Wartezeit für Serial (blockiert nicht ohne PC)
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  Serial.println("Digitale Wasserwaage");
+
+  // MMA8451 initialisieren
+  if (!mma.begin()) {
+    Serial.println("MMA8451 nicht gefunden!");
+    while (1);
+  }
+  Serial.println("MMA8451 gefunden!");
+  mma.setRange(MMA8451_RANGE_2_G);
+  mma.setDataRate(MMA8451_DATARATE_12_5_HZ);
+
+  // Einstellungen laden
+  loadSettings();
+
+  // MAC-Adresse auslesen und AP-SSID erstellen
+  macAddress = WiFi.macAddress();
+  String macSuffix = macAddress.substring(macAddress.length() - 5);
+  macSuffix.replace(":", "");
+  apSSID = "Digitale-Wasserwaage-" + macSuffix;
+
+  Serial.print("MAC: ");
+  Serial.println(macAddress);
+
+  // WLAN verbinden oder AP starten
+  if (!connectToSavedWiFi()) {
+    startAP();
+  }
+
+  // Webserver-Routen
+  server.on("/", handleRoot);
+  server.on("/config", handleConfig);
+  server.on("/settings", handleSettings);
+  server.on("/data", handleData);
+  server.on("/status", handleStatus);
+  server.on("/scan", handleScan);
+  server.on("/getsettings", handleGetSettings);
+  server.on("/savesettings", HTTP_POST, handleSaveSettings);
+  server.on("/zero", HTTP_POST, handleZero);
+  server.on("/connect", HTTP_POST, handleConnect);
+  server.on("/reset", HTTP_POST, handleReset);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  Serial.println("Webserver gestartet");
+}
+
+void loop() {
+  // DNS Server für Captive Portal im AP-Modus
+  if (apMode) {
+    dnsServer.processNextRequest();
+  }
+
+  server.handleClient();
+
+  // Neigungswerte lesen
+  sensors_event_t event;
+  mma.getEvent(&event);
+
+  float rawX = atan2(event.acceleration.x, event.acceleration.z) * 180.0 / PI;
+  float rawY = atan2(event.acceleration.y, event.acceleration.z) * 180.0 / PI;
+
+  // Offset und Invertierung anwenden (X/Y vertauscht wegen 90° gedrehtem Sensor)
+  angleX = (rawY - offsetX) * (invertX ? -1 : 1);
+  angleY = (rawX - offsetY) * (invertY ? -1 : 1);
+
+/*   // Serielle Ausgabe nur im AP-Modus
+  if (apMode) {
+    Serial.print(macAddress);
+    Serial.print("\tNeigung X: ");
+    Serial.print(angleX, 1);
+    Serial.print("°\tNeigung Y: ");
+    Serial.print(angleY, 1);
+    Serial.println("°");
+  }
+  */
+  delay(200); 
+}

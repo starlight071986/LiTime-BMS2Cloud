@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.platformio/penv/bin/pio run:*)",
+      "Read(//Users/marcelmayer/.platformio/packages/framework-arduinoespressif32/tools/partitions/**)"
+    ]
+  }
+}
