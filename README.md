@@ -11,6 +11,7 @@ ESP32-C3 Firmware zur Überwachung von LiTime LiFePO4-Batterien via Bluetooth Lo
 - **mDNS-Unterstützung** - erreichbar unter `http://litime-bms.local`
 - **NTP-Zeitsynchronisation** mit konfigurierbarer Zeitzone
 - **Robuste Fehlerbehandlung** bei Verbindungsabbrüchen (WLAN, BLE, Internet)
+- **LED-Statusanzeige** - Interne LED zeigt Verbindungsstatus durch Blinkmuster
 
 ## Hardware
 
@@ -73,6 +74,23 @@ Die Statusleiste oben zeigt den aktuellen Zustand aller Verbindungen:
 | Bluetooth | Aktiviert | - | - | Deaktiviert |
 | BMS | Verbunden | - | Getrennt | - |
 | Cloud | OK | - | Fehler | Deaktiviert |
+
+### LED-Statusanzeige
+
+Die interne LED (GPIO 8) des ESP32-C3 SuperMini zeigt den Verbindungsstatus durch Blinkmuster an. Die Anzahl der Blinker zeigt an, welche Verbindung fehlt:
+
+| Blinkmuster | Bedeutung |
+|-------------|-----------|
+| **1x Blinken** | WLAN nicht verbunden |
+| **2x Blinken** | BMS nicht verbunden oder keine gültigen Daten |
+| **3x Blinken** | Cloud-Fehler beim Senden |
+| **Dauerhaft an** | Alle aktivierten Dienste funktionieren |
+
+**Soll-Zustand wird berücksichtigt:**
+- Bluetooth deaktiviert → BMS-Status wird nicht geprüft
+- Cloud deaktiviert → Cloud-Status wird nicht geprüft
+
+Beispiel: Bei deaktiviertem Bluetooth und deaktivierter Cloud leuchtet die LED dauerhaft sobald WLAN verbunden ist.
 
 ## Home Assistant Integration
 

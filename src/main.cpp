@@ -47,6 +47,28 @@
 #define WIFI_TIMEOUT_MS 30000       // Timeout für WLAN-Verbindungsversuche (30 Sekunden)
 
 // ============================================================================
+// LED-Konfiguration für Status-Anzeige
+// ============================================================================
+// Die interne LED des ESP32-C3 SuperMini befindet sich auf GPIO 8
+// Sie zeigt den Verbindungsstatus durch Blinkmuster (Anzahl) an:
+//
+// Blinkmuster:
+// - 1x Blinken: WLAN-Problem (nicht verbunden)
+// - 2x Blinken: BMS-Problem (Bluetooth aktiv aber nicht verbunden/keine Daten)
+// - 3x Blinken: Cloud-Problem (Cloud aktiv aber Fehler beim Senden)
+// - Dauerhaft an: Alle aktivierten Dienste funktionieren
+//
+// Der Soll-Zustand wird berücksichtigt:
+// - Bluetooth deaktiviert → BMS-Status wird ignoriert
+// - Cloud deaktiviert → Cloud-Status wird ignoriert
+
+#define LED_PIN 8                   // GPIO-Pin der internen LED (ESP32-C3 SuperMini)
+#define LED_ACTIVE_LOW true         // LED ist aktiv-low (LOW = an, HIGH = aus)
+#define LED_BLINK_ON_TIME 150       // LED an-Zeit pro Blinker in ms
+#define LED_BLINK_OFF_TIME 200      // LED aus-Zeit zwischen Blinkern in ms
+#define LED_CYCLE_PAUSE 1200        // Pause zwischen Blinkzyklen in ms
+
+// ============================================================================
 // Globale Objekte
 // ============================================================================
 
@@ -163,6 +185,25 @@ unsigned long wifiCheckInterval = 30000;
 const char* ntpServer = "pool.ntp.org";
 
 // ============================================================================
+// LED-Status-Variablen für Blinkmuster
+// ============================================================================
+
+// Aktueller LED-Zustand (true = an, false = aus)
+bool ledState = false;
+
+// Zeitstempel des letzten LED-Zustandswechsels
+unsigned long lastLedChange = 0;
+
+// Anzahl der Blinker im aktuellen Zyklus (1, 2 oder 3)
+uint8_t ledBlinkCount = 0;
+
+// Aktueller Blinker im Zyklus (0 = Pause, 1-3 = Blinker)
+uint8_t ledCurrentBlink = 0;
+
+// Phase im Blinker (true = LED an, false = LED aus zwischen Blinkern)
+bool ledBlinkPhase = false;
+
+// ============================================================================
 // BMS-Datenstruktur
 // ============================================================================
 // Speichert alle vom BMS abgefragten Werte zwischen den Abfragen
@@ -197,6 +238,137 @@ struct BMSData {
 void printBMSDataSerial();    // Gibt BMS-Daten auf Serial aus
 void startAP();               // Startet den Access Point Modus
 bool connectToSavedWiFi();    // Verbindet mit gespeichertem WLAN
+
+// ============================================================================
+// LED-Steuerungsfunktionen
+// ============================================================================
+
+/**
+ * Schaltet die LED ein
+ *
+ * Berücksichtigt die Active-Low-Logik des ESP32-C3 SuperMini:
+ * Bei LED_ACTIVE_LOW = true wird LOW ausgegeben um die LED einzuschalten.
+ */
+void ledOn() {
+  digitalWrite(LED_PIN, LED_ACTIVE_LOW ? LOW : HIGH);
+  ledState = true;
+}
+
+/**
+ * Schaltet die LED aus
+ *
+ * Berücksichtigt die Active-Low-Logik des ESP32-C3 SuperMini:
+ * Bei LED_ACTIVE_LOW = true wird HIGH ausgegeben um die LED auszuschalten.
+ */
+void ledOff() {
+  digitalWrite(LED_PIN, LED_ACTIVE_LOW ? HIGH : LOW);
+  ledState = false;
+}
+
+/**
+ * Ermittelt die Anzahl der benötigten Blinker basierend auf dem Status
+ *
+ * Berücksichtigt den Soll-Zustand:
+ * - Wenn Bluetooth deaktiviert ist, wird BMS nicht geprüft
+ * - Wenn Cloud deaktiviert ist, wird Cloud nicht geprüft
+ *
+ * @return 0 = alles OK (LED dauerhaft an), 1-3 = Anzahl Blinker
+ */
+uint8_t getLedBlinkCount() {
+  // WLAN prüfen (immer erforderlich)
+  bool wlanOk = (WiFi.status() == WL_CONNECTED) || apMode;
+  if (!wlanOk) {
+    return 1;  // 1x Blinken: WLAN-Problem
+  }
+
+  // BMS prüfen (nur wenn Bluetooth aktiviert)
+  if (bluetoothEnabled) {
+    bool bmsOk = bmsConnected && bmsDataValid;
+    if (!bmsOk) {
+      return 2;  // 2x Blinken: BMS-Problem
+    }
+  }
+
+  // Cloud prüfen (nur wenn Cloud aktiviert)
+  if (haEnabled) {
+    bool cloudOk = (lastHaHttpCode == 200);
+    if (!cloudOk) {
+      return 3;  // 3x Blinken: Cloud-Problem
+    }
+  }
+
+  return 0;  // Alle aktivierten Dienste OK
+}
+
+/**
+ * Aktualisiert das LED-Blinkmuster basierend auf dem Verbindungsstatus
+ *
+ * Diese Funktion wird in jedem Loop-Durchlauf aufgerufen und steuert
+ * die LED gemäß dem aktuellen Verbindungsstatus.
+ *
+ * Blinkmuster nach Anzahl:
+ * - 1x Blinken: WLAN nicht verbunden
+ * - 2x Blinken: BMS nicht verbunden (wenn Bluetooth aktiviert)
+ * - 3x Blinken: Cloud-Fehler (wenn Cloud aktiviert)
+ * - Dauerhaft an: Alle aktivierten Dienste funktionieren
+ *
+ * @param currentMillis Aktueller Zeitstempel aus millis()
+ */
+void updateLED(unsigned long currentMillis) {
+  // Benötigte Blinker ermitteln
+  uint8_t requiredBlinks = getLedBlinkCount();
+
+  // Alles OK → LED dauerhaft an
+  if (requiredBlinks == 0) {
+    ledOn();
+    ledCurrentBlink = 0;
+    ledBlinkPhase = false;
+    return;
+  }
+
+  // Blinkanzahl hat sich geändert → Zyklus neu starten
+  if (requiredBlinks != ledBlinkCount) {
+    ledBlinkCount = requiredBlinks;
+    ledCurrentBlink = 0;
+    ledBlinkPhase = false;
+    ledOff();
+    lastLedChange = currentMillis;
+  }
+
+  // Zustandsautomat für Blinkmuster
+  unsigned long elapsed = currentMillis - lastLedChange;
+
+  if (ledCurrentBlink == 0) {
+    // Pause zwischen Zyklen
+    if (elapsed >= LED_CYCLE_PAUSE) {
+      ledCurrentBlink = 1;
+      ledBlinkPhase = true;
+      ledOn();
+      lastLedChange = currentMillis;
+    }
+  } else if (ledBlinkPhase) {
+    // LED ist an - warten bis an-Zeit vorbei
+    if (elapsed >= LED_BLINK_ON_TIME) {
+      ledOff();
+      ledBlinkPhase = false;
+      lastLedChange = currentMillis;
+    }
+  } else {
+    // LED ist aus - warten bis aus-Zeit vorbei
+    if (elapsed >= LED_BLINK_OFF_TIME) {
+      if (ledCurrentBlink < ledBlinkCount) {
+        // Nächster Blinker
+        ledCurrentBlink++;
+        ledBlinkPhase = true;
+        ledOn();
+      } else {
+        // Zyklus fertig, Pause starten
+        ledCurrentBlink = 0;
+      }
+      lastLedChange = currentMillis;
+    }
+  }
+}
 
 // ============================================================================
 // Einstellungen speichern und laden
@@ -1918,6 +2090,10 @@ void setup() {
   Serial.begin(115200);
   delay(2000);  // Warten bis Serial bereit ist (USB CDC braucht etwas Zeit)
 
+  // LED-Pin als Ausgang konfigurieren und LED ausschalten
+  pinMode(LED_PIN, OUTPUT);
+  ledOff();
+
   // Willkommensnachricht
   Serial.println();
   Serial.println("══════════════════════════════════════════════════════");
@@ -2045,6 +2221,12 @@ void setup() {
  */
 void loop() {
   unsigned long currentMillis = millis();
+
+  // ========================================
+  // LED-Status aktualisieren
+  // ========================================
+  // Zeigt Verbindungsstatus durch Blinkmuster an
+  updateLED(currentMillis);
 
   // ========================================
   // Webserver-Anfragen verarbeiten
