@@ -37,6 +37,7 @@
 #include <ArduinoJson.h>      // JSON-Serialisierung für API und Webhook
 #include <nvs_flash.h>        // Non-Volatile Storage Flash-Initialisierung
 #include <HTTPClient.h>       // HTTP-Client für Webhook-Anfragen
+#include <esp_task_wdt.h>     // Hardware Watchdog Timer für automatischen Reset bei Freeze
 
 // ============================================================================
 // Konstanten und Konfiguration
@@ -45,6 +46,9 @@
 // WLAN Access Point Konfiguration
 #define AP_PASSWORD "12345678"      // Passwort für den Access Point Modus
 #define WIFI_TIMEOUT_MS 30000       // Timeout für WLAN-Verbindungsversuche (30 Sekunden)
+
+// Watchdog-Timer Konfiguration
+#define WDT_TIMEOUT 30              // Watchdog Timeout in Sekunden (ESP32 resettet nach dieser Zeit)
 
 // ============================================================================
 // LED-Konfiguration für Status-Anzeige
@@ -214,6 +218,19 @@ uint8_t ledCurrentBlink = 0;
 bool ledBlinkPhase = false;
 
 // ============================================================================
+// Watchdog und Debugging-Variablen
+// ============================================================================
+
+// Minimaler freier Heap seit Start (für Speicherleck-Erkennung)
+size_t minFreeHeap = 0;
+
+// Zeitstempel des letzten Heap-Checks
+unsigned long lastHeapCheck = 0;
+
+// Intervall für Heap-Checks (alle 10 Sekunden)
+#define HEAP_CHECK_INTERVAL 10000
+
+// ============================================================================
 // BMS-Datenstruktur
 // ============================================================================
 // Speichert alle vom BMS abgefragten Werte zwischen den Abfragen
@@ -248,6 +265,97 @@ struct BMSData {
 void printBMSDataSerial();    // Gibt BMS-Daten auf Serial aus
 void startAP();               // Startet den Access Point Modus
 bool connectToSavedWiFi();    // Verbindet mit gespeichertem WLAN
+
+// ============================================================================
+// Watchdog und Crash-Logging Funktionen
+// ============================================================================
+
+/**
+ * Speichert den aktuellen Programmstatus im NVS für Crash-Analyse
+ *
+ * Diese Funktion wird vor kritischen Operationen aufgerufen und speichert
+ * die aktuelle Position im Code. Nach einem Watchdog-Reset kann man im
+ * Serial-Output sehen, wo der ESP32 zuletzt war.
+ *
+ * @param location Beschreibung der aktuellen Code-Position (z.B. "loop:bms_update")
+ */
+void logCrashLocation(const char* location) {
+  static unsigned long lastLog = 0;
+  unsigned long now = millis();
+
+  // Nicht zu oft schreiben (NVS hat begrenzte Schreibzyklen)
+  // Nur alle 5 Sekunden oder bei wichtigen Positionen (mit "!" Präfix)
+  if (location[0] != '!' && now - lastLog < 5000) {
+    return;
+  }
+  lastLog = now;
+
+  preferences.begin("crashlog", false);
+  preferences.putString("location", location);
+  preferences.putULong("millis", now);
+  preferences.putULong("freeHeap", ESP.getFreeHeap());
+  preferences.end();
+}
+
+/**
+ * Liest und zeigt das letzte Crash-Log an
+ *
+ * Wird in setup() aufgerufen um zu sehen, wo der ESP32 beim letzten
+ * Watchdog-Reset war. Hilft bei der Fehlersuche.
+ */
+void printLastCrashLog() {
+  preferences.begin("crashlog", true);
+  String lastLocation = preferences.getString("location", "");
+  unsigned long lastMillis = preferences.getULong("millis", 0);
+  unsigned long lastHeap = preferences.getULong("freeHeap", 0);
+  preferences.end();
+
+  if (lastLocation.length() > 0) {
+    Serial.println();
+    Serial.println("╔═══════════════════════════════════════════════════════");
+    Serial.println("║ WATCHDOG RESET ERKANNT!");
+    Serial.println("╠═══════════════════════════════════════════════════════");
+    Serial.println("║ Letzte Position: " + lastLocation);
+    Serial.println("║ Uptime: " + String(lastMillis / 1000) + " Sekunden");
+    Serial.println("║ Free Heap: " + String(lastHeap) + " bytes");
+    Serial.println("╚═══════════════════════════════════════════════════════");
+    Serial.println();
+  }
+}
+
+/**
+ * Löscht das Crash-Log nach erfolgreichem Start
+ *
+ * Wird nach einer gewissen Laufzeit aufgerufen (z.B. nach 60 Sekunden)
+ * um das alte Crash-Log zu löschen, damit beim nächsten Reset nur
+ * relevante Daten angezeigt werden.
+ */
+void clearCrashLog() {
+  preferences.begin("crashlog", false);
+  preferences.clear();
+  preferences.end();
+}
+
+/**
+ * Überwacht den freien Heap-Speicher
+ *
+ * Gibt Warnungen aus wenn der Speicher knapp wird (unter 10KB).
+ * Hilft Speicherlecks zu identifizieren.
+ */
+void checkHeapMemory() {
+  size_t currentHeap = ESP.getFreeHeap();
+
+  // Minimum tracken
+  if (minFreeHeap == 0 || currentHeap < minFreeHeap) {
+    minFreeHeap = currentHeap;
+    Serial.println("[HEAP] Neues Minimum: " + String(minFreeHeap) + " bytes");
+  }
+
+  // Warnung bei kritischem Speicher (unter 10KB)
+  if (currentHeap < 10240) {
+    Serial.println("[HEAP] ⚠️ WARNUNG: Nur noch " + String(currentHeap) + " bytes frei!");
+  }
+}
 
 // ============================================================================
 // LED-Steuerungsfunktionen
@@ -2232,6 +2340,16 @@ void setup() {
   Serial.println("══════════════════════════════════════════════════════");
   Serial.println();
 
+  // Watchdog-Timer konfigurieren (muss früh initialisiert werden)
+  Serial.println("[INIT] Konfiguriere Hardware Watchdog Timer...");
+  esp_task_wdt_init(WDT_TIMEOUT, true);  // 30 Sekunden Timeout, Auto-Reset aktiviert
+  esp_task_wdt_add(NULL);  // Aktuellen Task zum Watchdog hinzufügen
+  Serial.println("[INIT] Watchdog aktiviert: " + String(WDT_TIMEOUT) + "s Timeout");
+  Serial.println("[INIT] ESP32 wird automatisch resettet wenn keine Aktivität erkannt wird");
+
+  // Letztes Crash-Log anzeigen (falls vorhanden)
+  printLastCrashLog();
+
   // NVS (Non-Volatile Storage) initialisieren
   // Behebt den Fehler "nvs_open failed: NOT_FOUND"
   Serial.println("[INIT] Initialisiere NVS...");
@@ -2316,6 +2434,18 @@ void setup() {
   // Timing-Variablen initialisieren
   lastBmsUpdate = millis();
   lastNtpSync = millis();
+  lastHeapCheck = millis();
+
+  // Heap-Monitoring initialisieren
+  minFreeHeap = ESP.getFreeHeap();
+  Serial.println("[INIT] Aktueller freier Heap: " + String(minFreeHeap) + " bytes");
+
+  // Crash-Log löschen (Setup erfolgreich abgeschlossen)
+  // Wird nach 60 Sekunden gelöscht, falls keine Probleme auftreten
+  Serial.println("[INIT] Crash-Log wird nach 60s Laufzeit gelöscht");
+
+  // Watchdog einmal zurücksetzen nach Setup
+  esp_task_wdt_reset();
 
   // Setup abgeschlossen - Benutzerhinweise ausgeben
   Serial.println();
@@ -2354,6 +2484,31 @@ void setup() {
  */
 void loop() {
   unsigned long currentMillis = millis();
+
+  // ========================================
+  // Watchdog zurücksetzen (Lebenszeichen)
+  // ========================================
+  // WICHTIG: Muss regelmäßig aufgerufen werden, sonst Reset!
+  // Dies zeigt dem Watchdog, dass die loop() noch läuft
+  esp_task_wdt_reset();
+
+  // ========================================
+  // Crash-Log löschen nach 60 Sekunden Laufzeit
+  // ========================================
+  static bool crashLogCleared = false;
+  if (!crashLogCleared && currentMillis > 60000) {
+    clearCrashLog();
+    crashLogCleared = true;
+    Serial.println("[WATCHDOG] Crash-Log gelöscht (erfolgreicher Betrieb)");
+  }
+
+  // ========================================
+  // Heap-Speicher überwachen
+  // ========================================
+  if (currentMillis - lastHeapCheck >= HEAP_CHECK_INTERVAL) {
+    checkHeapMemory();
+    lastHeapCheck = currentMillis;
+  }
 
   // ========================================
   // LED-Status aktualisieren
@@ -2403,13 +2558,18 @@ void loop() {
   // ========================================
   // Wird vom API-Handler oder Reconnect-Timer angefordert
   if (bluetoothEnabled && bmsConnectPending && !bmsConnected && bmsMac.length() == 17) {
+    logCrashLocation("!loop:bms_connect_start");
     Serial.println("[BLE] Stelle BMS-Verbindung her...");
     bmsClient.init(bmsMac.c_str());
+    logCrashLocation("!loop:bms_connect_call");
     bmsConnected = bmsClient.connect();
+    logCrashLocation("!loop:bms_connect_done");
     bmsConnectPending = false;
     if (bmsConnected) {
       Serial.println("[BLE] BMS-Verbindung erfolgreich!");
+      logCrashLocation("!loop:bms_update_start");
       updateBMSData();
+      logCrashLocation("!loop:bms_update_done");
     } else {
       Serial.println("[BLE] BMS-Verbindung fehlgeschlagen");
     }
@@ -2424,6 +2584,7 @@ void loop() {
   // ========================================
   // Funktioniert auch im AP-Modus
   if (bluetoothEnabled && bmsConnected && (currentMillis - lastBmsUpdate >= bmsInterval * 1000)) {
+    logCrashLocation("loop:bms_periodic_update");
     updateBMSData();
     lastBmsUpdate = currentMillis;
   }
@@ -2451,7 +2612,12 @@ void loop() {
   // ========================================
   // Nur wenn aktiviert und WLAN verbunden
   if (haEnabled && !apMode && WiFi.status() == WL_CONNECTED && (currentMillis - lastHaSend >= haInterval * 1000)) {
+    logCrashLocation("!loop:ha_webhook_start");
     sendToHomeAssistant();
+    logCrashLocation("loop:ha_webhook_done");
     lastHaSend = currentMillis;
   }
+
+  // Allgemeine Loop-Position loggen (nicht zu oft)
+  logCrashLocation("loop:end");
 }
